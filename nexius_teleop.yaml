@@ -1,0 +1,12 @@
+teleop_twist_joy:
+  ros__parameters:
+    # Use LEFT STICK for motion
+    axis_linear.x: 1        # left stick up/down
+    scale_linear.x: 0.20
+
+    axis_angular.yaw: 0     # left stick left/right
+    scale_angular.yaw: 1.0
+
+    # No enable button (always active)
+    require_enable_button: false
+
