@@ -3,81 +3,132 @@ import asyncio
 import websockets
 import json
 import time
+import torch
 from ultralytics import YOLO
 
 # --- CONFIGURATION ---
 # The IP of your Raspberry Pi (from your HTML snippet)
-PI_STREAM_URL = "http://172.20.10.10:8080/?action=stream"
-# Port for the dashboard to listen to for AI data
-WEBSOCKET_PORT = 8765
-# How many frames to skip (Process 1 out of every N frames)
-FRAME_SKIP = 3 
+PI_STREAM_URL = "http://172.20.10.10:8080/?action=stream"  # MJPEG stream URL
+WEBSOCKET_PORT = 8765  # WebSocket port for dashboard
+
+# Target width for inference (maintain aspect)
+TARGET_INFERENCE_WIDTH = 640
+
+# Initial frame skip (process 1 in every N frames); may adapt
+INITIAL_FRAME_SKIP = 3
+
+# Adaptive skip bounds
+MIN_FRAME_SKIP = 2
+MAX_FRAME_SKIP = 6
+
+# Reconnection settings
+MAX_READ_FAILURES = 10
+RECONNECT_DELAY_SEC = 2
+
+# Confidence threshold for reporting detections
+CONF_THRESHOLD = 0.4
 
 # Load the lightweight YOLOv8 Nano model
 # It will download 'yolov8n.pt' automatically on first run (~6MB)
 print("Loading YOLOv8n model...")
-model = YOLO("yolov8n.pt") 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = YOLO("yolov8n.pt").to(device)
+if device == "cuda":
+    try:
+        model.model.half()
+        print("Model loaded in half precision on CUDA for speed.")
+    except Exception:
+        print("Half precision not applied; continuing in FP32.")
 
 async def detection_handler(websocket):
     print("Client connected to AI stream!")
-    
-    cap = cv2.VideoCapture(PI_STREAM_URL)
-    
+
+    def open_capture():
+        cap_local = cv2.VideoCapture(PI_STREAM_URL, cv2.CAP_FFMPEG)
+        cap_local.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap_local
+
+    cap = open_capture()
     if not cap.isOpened():
         print(f"Error: Could not open stream at {PI_STREAM_URL}")
         await websocket.send(json.dumps({"error": "Stream unavailable"}))
         return
 
     frame_count = 0
-    
-    try:
-        while cap.isOpened():
-            success, frame = cap.read()
-            if not success:
-                break
+    effective_skip = INITIAL_FRAME_SKIP
+    read_failures = 0
 
-            frame_count += 1
-            
-            # Skip frames to save CPU (Actionable 'lightweight' trick)
-            if frame_count % FRAME_SKIP != 0:
-                await asyncio.sleep(0.01) # Yield control slightly
+    try:
+        while True:
+            success, frame = cap.read()
+            if not success or frame is None:
+                read_failures += 1
+                if read_failures >= MAX_READ_FAILURES:
+                    print("Stream read failures exceeded threshold; attempting reconnect...")
+                    cap.release()
+                    await asyncio.sleep(RECONNECT_DELAY_SEC)
+                    cap = open_capture()
+                    read_failures = 0
+                    continue
+                await asyncio.sleep(0.01)
                 continue
 
-            # --- AI PROCESSING ---
-            # Resize for speed (optional, YOLO handles this, but smaller is faster)
-            # frame_small = cv2.resize(frame, (640, 480)) 
-            
-            # Run inference
-            # stream=True makes it faster/lighter
-            results = model(frame, stream=True, verbose=False)
+            read_failures = 0
+            frame_count += 1
+
+            if frame_count % effective_skip != 0:
+                await asyncio.sleep(0.001)
+                continue
+
+            # Maintain aspect ratio when resizing
+            h, w = frame.shape[:2]
+            if w != TARGET_INFERENCE_WIDTH:
+                new_h = int(h * (TARGET_INFERENCE_WIDTH / w))
+                frame_resized = cv2.resize(frame, (TARGET_INFERENCE_WIDTH, new_h), interpolation=cv2.INTER_AREA)
+            else:
+                frame_resized = frame
+
+            # Convert to proper dtype if using half precision on CUDA
+            if device == "cuda" and getattr(model.model, 'half', None):
+                # YOLO handles conversion internally; keep frame as uint8
+                pass
+
+            t0 = time.perf_counter()
+            results = model(frame_resized, stream=True, verbose=False)
+            infer_ms = (time.perf_counter() - t0) * 1000.0
 
             detections = []
-            
-            # Parse results
             for r in results:
                 boxes = r.boxes
                 for box in boxes:
-                    # Get box coordinates (normalized 0-1 is best for web scaling)
-                    x1, y1, x2, y2 = box.xyxyn[0].tolist() 
+                    x1, y1, x2, y2 = box.xyxyn[0].tolist()
                     conf = float(box.conf[0])
+                    if conf < CONF_THRESHOLD:
+                        continue
                     cls = int(box.cls[0])
-                    label = model.names[cls]
+                    label = model.names.get(cls, str(cls))
+                    detections.append({
+                        "label": label,
+                        "conf": round(conf, 3),
+                        "bbox": [x1, y1, x2, y2]
+                    })
 
-                    # Filter: Only send common traffic items to keep JSON light
-                    # (Remove this if check to see EVERYTHING)
-                    if conf > 0.4: 
-                        detections.append({
-                            "label": label,
-                            "conf": round(conf, 2),
-                            "bbox": [x1, y1, x2, y2] # Normalized coordinates
-                        })
+            # Adaptive skip logic based on inference time
+            if infer_ms > 50 and effective_skip < MAX_FRAME_SKIP:
+                effective_skip += 1
+            elif infer_ms < 30 and effective_skip > MIN_FRAME_SKIP:
+                effective_skip -= 1
 
-            # Send data to dashboard
-            payload = json.dumps({"timestamp": time.time(), "objects": detections})
+            payload = json.dumps({
+                "timestamp": time.time(),
+                "objects": detections,
+                "infer_ms": round(infer_ms, 2),
+                "skip": effective_skip,
+                "width": frame_resized.shape[1],
+                "height": frame_resized.shape[0]
+            })
             await websocket.send(payload)
-            
-            # Tiny sleep to let the event loop breathe
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
 
     except websockets.exceptions.ConnectionClosed:
         print("Client disconnected")
