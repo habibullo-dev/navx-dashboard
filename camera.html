@@ -1005,25 +1005,45 @@
     function updateAgentPosition(status) {
       const agent = document.getElementById("agent");
 
-      // 1. Update Robot Position
-      if (status.current_pose) {
-        // ROS X = SVG X, ROS Y = SVG -Y (usually)
-        const svgX = (status.current_pose.x * MAP_SCALE) + MAP_OFFSET_X;
-        const svgY = (-status.current_pose.y * MAP_SCALE) + MAP_OFFSET_Y;
+      let rosX = 0;
+      let rosY = 0;
+      let yaw = 0;
 
-        // Simple rotation handling if available, otherwise 0
-        const angle = 0;
-
-        agent.setAttribute("transform", `translate(${svgX}, ${svgY}) rotate(${angle})`);
+      // 1. Determine Target Position (Snap if reached)
+      if (status.home_reached && status.home) {
+        rosX = status.home.x;
+        rosY = status.home.y;
+        // Keep current yaw or snap? Let's keep real yaw for realism
+        if (status.current_pose) yaw = status.current_pose.yaw;
+      } else if (status.dest_reached && status.destination) {
+        rosX = status.destination.x;
+        rosY = status.destination.y;
+        if (status.current_pose) yaw = status.current_pose.yaw;
+      } else if (status.current_pose) {
+        rosX = status.current_pose.x;
+        rosY = status.current_pose.y;
+        yaw = status.current_pose.yaw;
+      } else {
+        return; // No data
       }
 
-      // 2. Update Home Marker
-      updateMarker("marker-home", status.home, "fa-home", "#00ffaa");
+      // 2. Convert to SVG Coordinates
+      // ROS X = SVG X, ROS Y = SVG -Y (usually)
+      const svgX = (rosX * MAP_SCALE) + MAP_OFFSET_X;
+      const svgY = (-rosY * MAP_SCALE) + MAP_OFFSET_Y;
 
-      // 3. Update Destination Marker
+      // 3. Convert Yaw (Radians) to Degrees
+      // ROS: 0 is East, CCW is positive. SVG: 0 is East, CW is positive (usually)
+      // Actually SVG rotate is CW positive. ROS is CCW positive. So negate angle.
+      const angleDeg = -yaw * (180 / Math.PI);
+
+      agent.setAttribute("transform", `translate(${svgX}, ${svgY}) rotate(${angleDeg})`);
+
+      // 4. Update Markers
+      updateMarker("marker-home", status.home, "fa-home", "#00ffaa");
       updateMarker("marker-dest", status.destination, "fa-map-marker-alt", "#ff0055");
 
-      // 4. Update Status Chip for Arrival
+      // 5. Update Status Chip for Arrival
       const chip = document.getElementById("map-status-chip");
       if (status.home_reached) {
         chip.innerHTML = '<i class="fas fa-check-circle"></i> HOME REACHED';
@@ -1034,16 +1054,6 @@
         chip.style.color = "#ff0055";
         chip.style.borderColor = "#ff0055";
       } else {
-        // Reset to default if not reached
-        // Only reset if we are not in High Risk (which is handled by updateTelemetry)
-        // We need to coordinate with updateTelemetry. 
-        // For now, let's just let updateTelemetry overwrite it if it runs, 
-        // but we should prioritize Arrival messages if they are active.
-        // A simple way is to check if we are NOT reached, then let telemetry handle it.
-        // But updateTelemetry runs on a loop or event? 
-        // updateTelemetry is called in setRoute.
-        // Let's just leave it, or reset it to "Route Stable" if we want to clear the message.
-        // Better: Let's add a global flag or just reset it here if no risk.
         if (!chip.innerHTML.includes("HIGH RISK")) {
           chip.innerHTML = '<i class="fas fa-shield-alt"></i> ROUTE STABLE';
           chip.style.color = "var(--accent-safe)";

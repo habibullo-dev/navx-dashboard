@@ -47,7 +47,19 @@ class WaypointNotifier(Node):
     def odom_callback(self, msg: Odometry):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
-        self.current_pose = (x, y)
+        
+        # Calculate Yaw from Quaternion
+        q = msg.pose.pose.orientation
+        # siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+        # cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+        # yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        # Simplified conversion for planar robot (z-axis rotation)
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        self.current_pose = (x, y, yaw)
 
         # Check home
         if self.home is not None:
@@ -72,9 +84,13 @@ class WaypointNotifier(Node):
         self.publish_status()
 
     def publish_status(self):
+        # current_pose is now (x, y, yaw)
         status = {
-            "x": self.current_pose[0],
-            "y": self.current_pose[1],
+            "current_pose": {
+                "x": self.current_pose[0],
+                "y": self.current_pose[1],
+                "yaw": self.current_pose[2]
+            },
             "home": {"x": self.home[0], "y": self.home[1]} if self.home else None,
             "destination": {"x": self.destination[0], "y": self.destination[1]} if self.destination else None,
             "home_reached": self.home_reached,
@@ -85,15 +101,15 @@ class WaypointNotifier(Node):
         self.pub_status.publish(msg)
 
     def set_home_callback(self, request, response):
-        self.home = self.current_pose
+        self.home = self.current_pose # Stores (x, y, yaw)
         self.home_reached = False
-        self.get_logger().info("🏠 Home saved at x=%.3f, y=%.3f" % self.home)
+        self.get_logger().info("🏠 Home saved at x=%.3f, y=%.3f" % (self.home[0], self.home[1]))
         return response
 
     def set_destination_callback(self, request, response):
-        self.destination = self.current_pose
+        self.destination = self.current_pose # Stores (x, y, yaw)
         self.dest_reached = False
-        self.get_logger().info("📍 Destination saved at x=%.3f, y=%.3f" % self.destination)
+        self.get_logger().info("📍 Destination saved at x=%.3f, y=%.3f" % (self.destination[0], self.destination[1]))
         return response
 
 
