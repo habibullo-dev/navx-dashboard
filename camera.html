@@ -948,6 +948,12 @@
 
     let ws = null;
 
+    // Map Scaling Configuration
+    // Adjust these to match your SVG map coordinates to ROS coordinates
+    const MAP_SCALE = 100; // Pixels per meter
+    const MAP_OFFSET_X = 400; // Center X in SVG
+    const MAP_OFFSET_Y = 400; // Center Y in SVG
+
     function connectWS() {
       ws = new WebSocket("ws://localhost:8765");
 
@@ -982,9 +988,63 @@
           }
         }
 
+        // Update Navigation
+        if (data.nav_status) {
+          updateAgentPosition(data.nav_status);
+        }
+
         // Draw AI
         drawAI(data);
       };
+    }
+
+    function updateAgentPosition(status) {
+      const agent = document.getElementById("agent");
+
+      // 1. Update Robot Position
+      if (status.current_pose) {
+        // ROS X = SVG X, ROS Y = SVG -Y (usually)
+        const svgX = (status.current_pose.x * MAP_SCALE) + MAP_OFFSET_X;
+        const svgY = (-status.current_pose.y * MAP_SCALE) + MAP_OFFSET_Y;
+
+        // Simple rotation handling if available, otherwise 0
+        // If you want rotation, you'd need to send orientation quaternion/yaw in nav_status
+        const angle = 0;
+
+        agent.setAttribute("transform", `translate(${svgX}, ${svgY}) rotate(${angle})`);
+      }
+
+      // 2. Update Home Marker
+      updateMarker("marker-home", status.home, "fa-home", "#00ffaa");
+
+      // 3. Update Destination Marker
+      updateMarker("marker-dest", status.destination, "fa-map-marker-alt", "#ff0055");
+    }
+
+    function updateMarker(id, pos, iconClass, color) {
+      let marker = document.getElementById(id);
+
+      if (!pos) {
+        if (marker) marker.style.display = "none";
+        return;
+      }
+
+      if (!marker) {
+        // Create marker if not exists
+        const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        g.id = id;
+        g.innerHTML = `<circle r="10" fill="${color}" opacity="0.3"/><text x="-6" y="4" font-family="FontAwesome" fill="white" font-size="12">&#xf015;</text>`;
+        // Note: FontAwesome inside SVG text is tricky, using simple circle for now or need unicode
+        // Let's use a simple circle with color
+        g.innerHTML = `<circle r="8" fill="${color}" stroke="white" stroke-width="2"/>`;
+        document.getElementById("nav-map").appendChild(g);
+        marker = g;
+      }
+
+      marker.style.display = "block";
+      const svgX = (pos.x * MAP_SCALE) + MAP_OFFSET_X;
+      const svgY = (-pos.y * MAP_SCALE) + MAP_OFFSET_Y;
+      marker.setAttribute("transform", `translate(${svgX}, ${svgY})`);
     }
 
     function drawAI(data) {
@@ -1016,6 +1076,7 @@
     }
 
     connectWS();
+    // animateAgentLoop(); // Disabled in favor of real data
 
   </script>
 </body>

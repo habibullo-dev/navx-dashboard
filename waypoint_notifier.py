@@ -1,9 +1,10 @@
 import math
-
+import json
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from std_srvs.srv import Empty
+from std_msgs.msg import String
 
 
 def distance(a, b):
@@ -21,6 +22,9 @@ class WaypointNotifier(Node):
             self.odom_callback,
             10
         )
+
+        # Publisher for Dashboard
+        self.pub_status = self.create_publisher(String, '/nav_status', 10)
 
         # Services to save current pose as home/destination
         self.srv_home = self.create_service(Empty, 'set_home', self.set_home_callback)
@@ -63,6 +67,22 @@ class WaypointNotifier(Node):
                 self.get_logger().info("🎯 Destination reached! (distance: %.3f m)" % d_dest)
             elif d_dest > self.reach_threshold:
                 self.dest_reached = False
+        
+        # Publish Status for Dashboard
+        self.publish_status()
+
+    def publish_status(self):
+        status = {
+            "x": self.current_pose[0],
+            "y": self.current_pose[1],
+            "home": {"x": self.home[0], "y": self.home[1]} if self.home else None,
+            "destination": {"x": self.destination[0], "y": self.destination[1]} if self.destination else None,
+            "home_reached": self.home_reached,
+            "dest_reached": self.dest_reached
+        }
+        msg = String()
+        msg.data = json.dumps(status)
+        self.pub_status.publish(msg)
 
     def set_home_callback(self, request, response):
         self.home = self.current_pose

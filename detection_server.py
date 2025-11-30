@@ -4,7 +4,13 @@ import websockets
 import json
 import time
 import torch
+import threading
 from ultralytics import YOLO
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+from sensor_msgs.msg import BatteryState
 
 # --- CONFIGURATION ---
 # The IP of your Raspberry Pi (from your HTML snippet)
@@ -28,17 +34,53 @@ RECONNECT_DELAY_SEC = 2
 # Confidence threshold for reporting detections
 CONF_THRESHOLD = 0.4
 
+# Global State for ROS Data
+latest_battery_pct = "--"
+latest_nav_status = None
+
+class BridgeNode(Node):
+    def __init__(self):
+        super().__init__('dashboard_bridge')
+        
+        # Subscribe to Battery
+        self.sub_batt = self.create_subscription(
+            BatteryState,
+            '/battery_state',
+            self.battery_callback,
+            10
+        )
+        
+        # Subscribe to Navigation Status
+        self.sub_nav = self.create_subscription(
+            String,
+            '/nav_status',
+            self.nav_callback,
+            10
+        )
+        
+        self.get_logger().info("Bridge Node Started. Listening for /battery_state and /nav_status")
+
+    def battery_callback(self, msg: BatteryState):
+        global latest_battery_pct
+        try:
+            latest_battery_pct = int(msg.percentage)
+        except:
+            pass
+
+    def nav_callback(self, msg: String):
+        global latest_nav_status
+        try:
+            latest_nav_status = json.loads(msg.data)
+        except:
+            pass
+
+
 # Load the lightweight YOLOv8 Nano model
 # It will download 'yolov8n.pt' automatically on first run (~6MB)
 print("Loading YOLOv8n model...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = YOLO("yolov8n.pt").to(device)
-# if device == "cuda":
-#     try:
-#         model.model.half()
-#         print("Model loaded in half precision on CUDA for speed.")
-#     except Exception:
-#         print("Half precision not applied; continuing in FP32.")
+
 
 async def detection_handler(websocket):
     print("Client connected to AI stream!")
@@ -51,7 +93,6 @@ async def detection_handler(websocket):
     cap = None
     frame_count = 0
     effective_skip = INITIAL_FRAME_SKIP
-    last_battery_pct = "--"
     
     # Try to open initially
     cap = open_capture()
@@ -115,35 +156,14 @@ async def detection_handler(websocket):
                         elif infer_ms < 30 and effective_skip > MIN_FRAME_SKIP:
                             effective_skip -= 1
 
-            # --- 2. BATTERY CHECK (Independent of Camera) ---
-            if frame_count % 60 == 0:
-                try:
-                    cmd = ["timeout", "2.0", "ros2", "topic", "echo", "/battery_state", "--field", "percentage", "--once"]
-                    proc = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await proc.communicate()
-                    
-                    if stdout:
-                        val = stdout.decode().strip().replace('---', '').strip()
-                        if val:
-                            try:
-                                last_battery_pct = int(float(val))
-                                print(f"Battery: {last_battery_pct}%")
-                            except ValueError:
-                                pass
-                except Exception as e:
-                    print(f"Battery check failed: {e}")
-
-            # --- 3. SEND PAYLOAD ---
+            # --- 2. SEND PAYLOAD ---
             # Always send payload, even if camera is down (detections will be empty)
             payload = {
                 "timestamp": time.time(),
                 "objects": detections,
                 "infer_ms": round(infer_ms, 2),
-                "battery": last_battery_pct
+                "battery": latest_battery_pct,
+                "nav_status": latest_nav_status
             }
             
             if frame_resized is not None:
@@ -161,9 +181,16 @@ async def detection_handler(websocket):
         if cap: cap.release()
 
 async def main():
+    # Start ROS Node in a separate thread
+    rclpy.init()
+    node = BridgeNode()
+    ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    ros_thread.start()
+    
     print(f"Starting AI WebSocket server on port {WEBSOCKET_PORT}...")
     print(f"Reading stream from: {PI_STREAM_URL}")
-    async with websockets.serve(detection_handler, "localhost", WEBSOCKET_PORT):
+    
+    async with websockets.serve(detection_handler, "0.0.0.0", WEBSOCKET_PORT):
         await asyncio.Future()  # Run forever
 
 if __name__ == "__main__":
