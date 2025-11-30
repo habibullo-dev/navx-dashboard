@@ -25,7 +25,7 @@
     <style>
       /* --- LAYOUT REDESIGN --- */
       :root {
-        --sidebar-width: 380px;
+        --sidebar-width: 550px;
         --header-height: 60px;
       }
 
@@ -332,6 +332,74 @@
         border-width: 0;
         pointer-events: none;
       }
+      /* Mode Details Banner */
+      #mode-details {
+        margin-top: 16px;
+        border: 1px solid var(--border-color);
+        background: rgba(0, 0, 0, 0.4);
+        padding: 16px;
+        display: none; /* Hidden until mode selected */
+        animation: fadeIn 0.3s ease;
+        position: relative;
+        overflow: hidden;
+      }
+      
+      #mode-details.active {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .mode-banner-header {
+        font-family: "Oswald", sans-serif;
+        font-size: 1.1rem;
+        letter-spacing: 1px;
+        color: white;
+        text-transform: uppercase;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .mode-banner-desc {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        line-height: 1.4;
+      }
+
+      .mode-stat-bar {
+        margin-top: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      
+      .stat-label {
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        display: flex;
+        justify-content: space-between;
+      }
+      
+      .stat-track {
+        height: 4px;
+        background: rgba(255,255,255,0.1);
+        width: 100%;
+        border-radius: 2px;
+      }
+      
+      .stat-fill {
+        height: 100%;
+        background: var(--accent-safe);
+        width: 0%;
+        transition: width 0.5s ease, background 0.3s ease;
+        border-radius: 2px;
+      }
+
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(5px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
     </style>
   </head>
   <body>
@@ -376,6 +444,7 @@
               src="http://172.20.10.10:8080/?action=stream"
               alt="Stream"
               onerror="handleStreamError()"
+              onload="handleStreamSuccess()"
             />
             <!-- AI Overlay -->
             <canvas id="ai-layer"></canvas>
@@ -443,6 +512,24 @@
               <span class="mode-name">COMFORT</span>
               <span class="mode-meta">18 min</span>
             </div>
+          </div>
+
+          <!-- Mode Details Banner -->
+          <div id="mode-details">
+             <div class="mode-banner-header" id="md-header">
+                <i class="fas fa-info-circle"></i> <span>--</span>
+             </div>
+             <div class="mode-banner-desc" id="md-desc">--</div>
+             
+             <!-- Stats -->
+             <div class="mode-stat-bar">
+                <div class="stat-label"><span>EFFICIENCY</span><span id="md-eff-val">0%</span></div>
+                <div class="stat-track"><div class="stat-fill" id="md-eff-fill"></div></div>
+             </div>
+             <div class="mode-stat-bar">
+                <div class="stat-label"><span>SAFETY</span><span id="md-safe-val">0%</span></div>
+                <div class="stat-track"><div class="stat-fill" id="md-safe-fill"></div></div>
+             </div>
           </div>
         </div>
 
@@ -586,11 +673,45 @@
       });
 
       // --- Stream Error Handling ---
+      // --- Stream Health Monitor & Auto-Reconnect ---
+      const STREAM_URL = "http://172.20.10.10:8080/?action=stream";
+      const SNAPSHOT_URL = "http://172.20.10.10:8080/?action=snapshot";
+      let isStreamOnline = true; // Assume online initially, let checks correct it
+
+      // Periodically check if the camera is actually alive
+      setInterval(() => {
+        const tester = new Image();
+        tester.onload = () => {
+            // Camera is responding
+            if(!isStreamOnline) {
+                console.log("Health check passed: Stream returned!");
+                isStreamOnline = true;
+                handleStreamSuccess();
+                // Force reconnect the main stream
+                document.getElementById("camera-stream").src = `${STREAM_URL}&t=${Date.now()}`;
+            }
+        };
+        tester.onerror = () => {
+            // Camera is dead
+            // We check if it WAS online to avoid spamming logs/UI updates
+            // But we also force it if the UI is currently showing the image (frozen frame case)
+            const img = document.getElementById("camera-stream");
+            if(isStreamOnline || img.style.display !== "none") {
+                console.log("Health check failed: Stream lost!");
+                isStreamOnline = false;
+                handleStreamError();
+            }
+        };
+        // Add timestamp to bypass cache
+        tester.src = `${SNAPSHOT_URL}&t=${Date.now()}`;
+      }, 2000); // Check every 2 seconds
+
       function handleStreamError() {
         const img = document.getElementById("camera-stream");
         const placeholder = document.getElementById("cam-placeholder");
         const status = document.getElementById("cam-status");
         
+        // Update UI to "Lost" state
         img.style.display = "none";
         placeholder.style.display = "flex";
         
@@ -598,6 +719,25 @@
             status.textContent = "● SIGNAL LOST";
             status.style.color = "var(--accent-fast)";
         }
+        
+        isStreamOnline = false;
+      }
+
+      function handleStreamSuccess() {
+        const img = document.getElementById("camera-stream");
+        const placeholder = document.getElementById("cam-placeholder");
+        const status = document.getElementById("cam-status");
+
+        // Restore UI
+        img.style.display = "block";
+        placeholder.style.display = "none";
+        
+        if(status) {
+            status.textContent = "● ONLINE";
+            status.style.color = "var(--accent-safe)";
+        }
+        
+        isStreamOnline = true;
       }
 
       /* --- Map & Navigation Logic --- */
@@ -607,6 +747,30 @@
         comfort: { id: "path-comfort", baseRisk: 2.5, speed: 55 },
       };
       let activeMode = "fastest";
+
+      const modeData = {
+        fastest: { 
+           title: "SPEED PRIORITY", 
+           desc: "Optimized for minimum travel time. Higher risk tolerance allowed in non-residential zones.",
+           eff: 95,
+           safe: 60,
+           color: "#ff0055"
+        },
+        scenic: { 
+           title: "SCENIC ROUTE", 
+           desc: "Maximizes coastal and park views. Speed limited for passenger comfort.",
+           eff: 40,
+           safe: 98,
+           color: "#00aaff"
+        },
+        comfort: { 
+           title: "PASSENGER COMFORT", 
+           desc: "Balanced profile with strict G-force limits. Smoothest ride quality.",
+           eff: 70,
+           safe: 90,
+           color: "#00ffaa"
+        }
+      };
 
       function setRoute(mode) {
         activeMode = mode;
@@ -632,6 +796,39 @@
         }
 
         updateTelemetry();
+        updateModeBanner(mode);
+      }
+
+      function updateModeBanner(mode) {
+        const details = document.getElementById("mode-details");
+        const data = modeData[mode];
+        
+        if(!data) return;
+        
+        details.classList.add("active");
+        
+        // Update Header Color
+        const headerIcon = details.querySelector(".mode-banner-header i");
+        headerIcon.style.color = data.color;
+        
+        // Update Text
+        const headerSpan = document.getElementById("md-header").querySelector("span");
+        headerSpan.innerText = data.title;
+        headerSpan.style.color = data.color;
+
+        document.getElementById("md-desc").innerText = data.desc;
+        
+        // Update Bars
+        document.getElementById("md-eff-val").innerText = data.eff + "%";
+        document.getElementById("md-eff-fill").style.width = data.eff + "%";
+        document.getElementById("md-eff-fill").style.background = data.color;
+        
+        document.getElementById("md-safe-val").innerText = data.safe + "%";
+        document.getElementById("md-safe-fill").style.width = data.safe + "%";
+        document.getElementById("md-safe-fill").style.background = data.color;
+        
+        // Border accent
+        details.style.borderLeft = `4px solid ${data.color}`;
       }
 
       function updateTelemetry() {
